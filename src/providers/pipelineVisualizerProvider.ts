@@ -31,6 +31,7 @@ export class PipelineVisualizerProvider {
     private hiddenSources = new Set<string>();
     private sourceColors = new Map<string, string>();
     private interpolateInputs: boolean = true;
+    private showRawCode: boolean = false;
     private lastDocument?: vscode.TextDocument;
     private lastComponentContext?: any;
 
@@ -69,6 +70,10 @@ export class PipelineVisualizerProvider {
                 } else if (message.type === 'toggleInterpolation') {
                     this.interpolateInputs = message.interpolateInputs;
                     // Trigger a re-parse by calling show again with saved context
+                    this.show(this.lastComponentContext, this.lastDocument);
+                } else if (message.type === 'toggleRawCode') {
+                    this.showRawCode = message.showRawCode;
+                    // Trigger a re-render by calling show again
                     this.show(this.lastComponentContext, this.lastDocument);
                 }
             });
@@ -337,17 +342,36 @@ export class PipelineVisualizerProvider {
                     jobNameToId.set(job.name, jobId);
 
                     let extraInfo = '';
-                    if (job.rules && job.rules.length > 0) {
-                        extraInfo += `<br/><small>📝 ${job.rules.length} rule(s)</small>`;
-                    }
-                    if (job.variables && Object.keys(job.variables).length > 0) {
-                        extraInfo += `<br/><small>🔧 ${Object.keys(job.variables).length} var(s)</small>`;
-                    }
-                    if (job.hasBeforeScript) {
-                        extraInfo += `<br/><small>⚙️ before_script</small>`;
-                    }
-                    if (job.hasAfterScript) {
-                        extraInfo += `<br/><small>⚙️ after_script</small>`;
+                    if (this.showRawCode) {
+                        if (job.rules && job.rules.length > 0) {
+                            const rawRules = escapeMermaid(JSON.stringify(job.rules, null, 2).replace(/"/g, "'")).replace(/\n/g, '<br/>').replace(/ /g, '&#160;');
+                            extraInfo += `<br/><br/><b>rules:</b><br/><small>${rawRules}</small>`;
+                        }
+                        if (job.variables && Object.keys(job.variables).length > 0) {
+                            const rawVars = escapeMermaid(JSON.stringify(job.variables, null, 2).replace(/"/g, "'")).replace(/\n/g, '<br/>').replace(/ /g, '&#160;');
+                            extraInfo += `<br/><br/><b>variables:</b><br/><small>${rawVars}</small>`;
+                        }
+                        if (job.beforeScript) {
+                            const rawBefore = escapeMermaid(JSON.stringify(job.beforeScript, null, 2).replace(/"/g, "'")).replace(/\n/g, '<br/>').replace(/ /g, '&#160;');
+                            extraInfo += `<br/><br/><b>before_script:</b><br/><small>${rawBefore}</small>`;
+                        }
+                        if (job.afterScript) {
+                            const rawAfter = escapeMermaid(JSON.stringify(job.afterScript, null, 2).replace(/"/g, "'")).replace(/\n/g, '<br/>').replace(/ /g, '&#160;');
+                            extraInfo += `<br/><br/><b>after_script:</b><br/><small>${rawAfter}</small>`;
+                        }
+                    } else {
+                        if (job.rules && job.rules.length > 0) {
+                            extraInfo += `<br/><small>📝 ${job.rules.length} rule(s)</small>`;
+                        }
+                        if (job.variables && Object.keys(job.variables).length > 0) {
+                            extraInfo += `<br/><small>🔧 ${Object.keys(job.variables).length} var(s)</small>`;
+                        }
+                        if (job.hasBeforeScript) {
+                            extraInfo += `<br/><small>⚙️ before_script</small>`;
+                        }
+                        if (job.hasAfterScript) {
+                            extraInfo += `<br/><small>⚙️ after_script</small>`;
+                        }
                     }
 
                     mermaidCode += `    ${jobId}["${escapeMermaid(job.name)}<br/><small><i>${escapeMermaid(job.source)}</i></small>${extraInfo}"]\n`;
@@ -599,10 +623,14 @@ export class PipelineVisualizerProvider {
         <body>
             <div class="container">
                 <h2>Pipeline: ${escapeHtml(sourceName)}</h2>
-                <div style="margin-bottom: 10px;">
+                <div style="margin-bottom: 10px; display: flex; gap: 20px;">
                     <label style="display: flex; align-items: center; gap: 5px; cursor: pointer; user-select: none;">
                         <input type="checkbox" id="toggleInterpolation" ${this.interpolateInputs ? 'checked' : ''}>
                         Interpolate Component Inputs
+                    </label>
+                    <label style="display: flex; align-items: center; gap: 5px; cursor: pointer; user-select: none;">
+                        <input type="checkbox" id="toggleRawCode" ${this.showRawCode ? 'checked' : ''}>
+                        Show Raw CI Element Code
                     </label>
                 </div>
                 ${pepPanelHtml}
@@ -705,6 +733,13 @@ export class PipelineVisualizerProvider {
                     vscode.postMessage({
                         type: 'toggleInterpolation',
                         interpolateInputs: e.target.checked
+                    });
+                });
+
+                document.getElementById('toggleRawCode').addEventListener('change', (e) => {
+                    vscode.postMessage({
+                        type: 'toggleRawCode',
+                        showRawCode: e.target.checked
                     });
                 });
 

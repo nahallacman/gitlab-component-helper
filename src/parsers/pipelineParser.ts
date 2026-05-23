@@ -15,6 +15,8 @@ export interface PipelineJob {
     variables?: Record<string, string>;
     hasBeforeScript?: boolean;
     hasAfterScript?: boolean;
+    beforeScript?: any;
+    afterScript?: any;
 }
 
 export interface PipelineStage {
@@ -204,6 +206,9 @@ export class PipelineParser {
                 let variables = typeof jobObj.variables === 'object' ? jobObj.variables : undefined;
                 let hasBeforeScript = !!jobObj.before_script;
                 let hasAfterScript = !!jobObj.after_script;
+                
+                let beforeScript = jobObj.before_script;
+                let afterScript = jobObj.after_script;
 
                 this.allJobs.push({
                     name: key,
@@ -213,7 +218,9 @@ export class PipelineParser {
                     rules: rules,
                     variables: variables,
                     hasBeforeScript: hasBeforeScript,
-                    hasAfterScript: hasAfterScript
+                    hasAfterScript: hasAfterScript,
+                    beforeScript: beforeScript,
+                    afterScript: afterScript
                 });
             }
         }
