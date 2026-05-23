@@ -338,6 +338,106 @@ pipeline_execution_policy:
             console.error('Include tree: FAIL ❌', e.message);
             failed++;
         }
+        console.log('\nTest 8: Advanced job properties (needs, rules, variables, scripts) are extracted');
+        try {
+            const parser = new PipelineParser(10);
+            const yaml = `
+advanced_job:
+  script: echo "Advanced"
+  needs:
+    - job_a
+    - project: other/project
+      job: job_b
+      ref: main
+  variables:
+    MY_VAR: "value"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  before_script:
+    - echo "before"
+  after_script:
+    - echo "after"
+`;
+            const graph = await parser.parse(yaml, 'main.yml');
+            const jobs = graph.stages.flatMap(s => s.jobs);
+            const advJob = jobs.find(j => j.name === 'advanced_job');
+            
+            assert.ok(advJob, 'advanced_job must be parsed');
+            
+            // needs array should extract string needs and job objects
+            assert.strictEqual(advJob.needs.length, 2, 'Should extract 2 needs');
+            assert.ok(advJob.needs.includes('job_a'), 'String need must be extracted');
+            assert.ok(advJob.needs.includes('job_b'), 'Object need must extract job name');
+            
+            // variables
+            assert.ok(advJob.variables, 'Variables should be extracted');
+            assert.strictEqual(advJob.variables.MY_VAR, 'value', 'Variable value must match');
+            
+            // rules
+            assert.strictEqual(advJob.rules.length, 1, 'Should extract 1 rule');
+            assert.strictEqual(advJob.rules[0].if, '$CI_COMMIT_BRANCH == "main"', 'Rule condition must match');
+            
+            // scripts
+            assert.strictEqual(advJob.hasBeforeScript, true, 'hasBeforeScript must be true');
+            assert.strictEqual(advJob.hasAfterScript, true, 'hasAfterScript must be true');
+            
+            console.log('Advanced properties extraction: PASS ✅');
+            passed++;
+        } catch (e) {
+            console.error('Advanced properties extraction: FAIL ❌', e.message);
+            failed++;
+        }
+
+        console.log('\nTest 9: Component inputs are interpolated correctly');
+        try {
+            const parser = new PipelineParser(10);
+            const componentYaml = `
+spec:
+  inputs:
+    stage_name:
+      default: test
+    job_prefix:
+      default: default_
+---
+$[[ inputs.job_prefix ]]job:
+  stage: $[[ inputs.stage_name ]]
+  script: echo "interpolated"
+`;
+            
+            // We'll mock the cacheManager fetch via the test's esbuild interception?
+            // Actually, in Test 5/6 we just feed it directly or via tryResolveLocal.
+            // Let's directly call parseRecursive with providedInputs for simplicity.
+            const graph = { stages: [], errors: [], allJobs: [] };
+            
+            // To test parser's interpolation, we can instantiate it and call it through its public parse
+            // But parse doesn't accept component inputs natively, it fetches them via include.
+            // Let's mock the fetch for a component
+            mockComponentService.httpClient.fetchText = async (url) => ''; // Not used for component
+            
+            // Override cache manager for this test
+            const originalGetCache = originalRequire('.../componentCacheManager'); // just mocking
+            const fakeGraph = await parser.parse('include:\n  - component: test-comp@1.0\n    inputs:\n      stage_name: build\n      job_prefix: custom_', 'main.yml');
+            
+            // Since we didn't mock the cache manager perfectly here, let's just use the parser's internal parseRecursive via reflection/any cast or 
+            // wait, we can just mock the component service correctly.
+            // Instead, I'll test it via parseRecursive directly since we are in JS
+            await parser.parseRecursive(componentYaml, 'test-comp', 0, { name: 'root', children: [] }, { interpolateInputs: true }, undefined, { stage_name: 'deploy', job_prefix: 'my_' });
+            
+            parser.buildGraph(); // actually buildGraph uses the internal state
+            
+            // We can just check this.allJobs
+            const jobs = parser.allJobs;
+            const myJob = jobs.find(j => j.name === 'my_job');
+            
+            assert.ok(myJob, 'Interpolated job name should be parsed');
+            assert.strictEqual(myJob.stage, 'deploy', 'Stage name should be interpolated');
+
+            console.log('Component inputs interpolation: PASS ✅');
+            passed++;
+        } catch (e) {
+            console.error('Component inputs interpolation: FAIL ❌', e.message);
+            failed++;
+        }
     } finally {
         if (fs.existsSync(tempFile)) {
             fs.unlinkSync(tempFile);
@@ -346,7 +446,7 @@ pipeline_execution_policy:
 
 
     console.log(`\n=== Pipeline Parser Test Summary ===`);
-    console.log(`Total tests: 7`);
+    console.log(`Total tests: 9`);
     console.log(`Passed: ${passed} ✅`);
     console.log(`Failed: ${failed} ${failed > 0 ? '❌' : ''}`);
 

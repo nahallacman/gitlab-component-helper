@@ -10,6 +10,11 @@ export interface PipelineJob {
     name: string;
     stage: string;
     source: string;
+    needs?: string[];
+    rules?: any[];
+    variables?: Record<string, string>;
+    hasBeforeScript?: boolean;
+    hasAfterScript?: boolean;
 }
 
 export interface PipelineStage {
@@ -42,6 +47,7 @@ export interface ParserContext {
     customVariables?: Record<string, string>;
     activePolicyOverride?: string;
     serverUrl?: string;
+    interpolateInputs?: boolean;
     [key: string]: any;
 }
 
@@ -53,6 +59,7 @@ export interface IncludeDirective {
     remote?: string;
     component?: string;
     template?: string;
+    inputs?: Record<string, any>;
 }
 
 const DEFAULT_STAGES = ['.pre', 'build', 'test', 'deploy', '.post'];
@@ -111,7 +118,7 @@ export class PipelineParser {
         return this.buildGraph();
     }
 
-    private async parseRecursive(content: string, sourceName: string, depth: number, parentNode: IncludeNode, context?: ParserContext, componentOrigin?: ComponentOrigin) {
+    private async parseRecursive(content: string, sourceName: string, depth: number, parentNode: IncludeNode, context?: ParserContext, componentOrigin?: ComponentOrigin, providedInputs?: Record<string, any>) {
         if (depth >= this.maxDepth) {
             this.errors.push(`Max recursion depth (${this.maxDepth}) reached at ${sourceName}`);
             return;
@@ -126,9 +133,36 @@ export class PipelineParser {
         // Strip out the `spec:` block and split by --- to handle components
         const parts = content.split(/^---\s*$/m);
         let ciContent = content;
+        let specInputs: Record<string, any> = {};
+
         if (parts.length > 1) {
             // Usually spec is before ---, and jobs are after.
+            if (context?.interpolateInputs !== false) {
+                try {
+                    const specDoc = parseYaml(parts[0]);
+                    if (specDoc && specDoc.spec && specDoc.spec.inputs) {
+                        for (const key of Object.keys(specDoc.spec.inputs)) {
+                            const val = specDoc.spec.inputs[key];
+                            if (val && typeof val === 'object' && 'default' in val) {
+                                specInputs[key] = val.default;
+                            }
+                        }
+                    }
+                } catch (e) {
+                    // Ignore parse errors in spec block, proceed with empty defaults
+                }
+            }
             ciContent = parts.slice(1).join('\n');
+        }
+
+        if (context?.interpolateInputs !== false) {
+            const finalInputs = { ...specInputs, ...(providedInputs || {}) };
+            ciContent = ciContent.replace(/\$\[\[\s*inputs\.([a-zA-Z0-9_]+)\s*\]\]/g, (match, key) => {
+                if (finalInputs[key] !== undefined) {
+                    return String(finalInputs[key]);
+                }
+                return match;
+            });
         }
 
         const parsed = parseYaml(ciContent);
@@ -156,10 +190,30 @@ export class PipelineParser {
             const jobObj = parsed[key];
             if (jobObj && typeof jobObj === 'object') {
                 const stage = jobObj.stage || 'test'; // default stage is test in GitLab CI
+                
+                let needs: string[] = [];
+                if (jobObj.needs && Array.isArray(jobObj.needs)) {
+                    needs = jobObj.needs.map((n: any) => typeof n === 'string' ? n : (n.job || ''));
+                }
+                
+                let rules: any[] = [];
+                if (jobObj.rules && Array.isArray(jobObj.rules)) {
+                    rules = jobObj.rules;
+                }
+
+                let variables = typeof jobObj.variables === 'object' ? jobObj.variables : undefined;
+                let hasBeforeScript = !!jobObj.before_script;
+                let hasAfterScript = !!jobObj.after_script;
+
                 this.allJobs.push({
                     name: key,
                     stage: stage,
-                    source: sourceName
+                    source: sourceName,
+                    needs: needs.filter(n => n),
+                    rules: rules,
+                    variables: variables,
+                    hasBeforeScript: hasBeforeScript,
+                    hasAfterScript: hasAfterScript
                 });
             }
         }
@@ -260,7 +314,7 @@ export class PipelineParser {
 
             if (directive.local) {
                 // Local include
-                await this.resolveLocalInclude(directive.local, currentSource, depth, parentNode, context, componentOrigin);
+                await this.resolveLocalInclude(directive.local, currentSource, depth, parentNode, context, componentOrigin, directive.inputs);
                 return;
             } else if (directive.component) {
                 // Component include
@@ -314,7 +368,7 @@ export class PipelineParser {
                             }
                             const node = { name: nodeName, children: [] };
                             parentNode.children.push(node);
-                            await this.parseRecursive(resolved.content, resolved.path, depth, node, context);
+                            await this.parseRecursive(resolved.content, resolved.path, depth, node, context, undefined, directive.inputs);
                             resolvedLocally = true;
                             break;
                         }
@@ -339,7 +393,7 @@ export class PipelineParser {
                             };
                             const node = { name: targetName, children: [] };
                             parentNode.children.push(node);
-                            await this.parseRecursive(content, targetName, depth, node, context, origin);
+                            await this.parseRecursive(content, targetName, depth, node, context, origin, directive.inputs);
                             fetched = true;
                             break;
                         }
@@ -389,7 +443,7 @@ export class PipelineParser {
                             }
                             const node = { name: nodeName, children: [] };
                             parentNode.children.push(node);
-                            await this.parseRecursive(resolved.content, resolved.path, depth, node, context);
+                            await this.parseRecursive(resolved.content, resolved.path, depth, node, context, undefined, directive.inputs);
                             continue; // Move to next file in directive.file array
                         }
                     }
@@ -405,7 +459,7 @@ export class PipelineParser {
                             const origin: ComponentOrigin = { gitlabInstance, projectPath, ref };
                             const node = { name: targetName, children: [] };
                             parentNode.children.push(node);
-                            await this.parseRecursive(content, targetName, depth, node, context, origin);
+                            await this.parseRecursive(content, targetName, depth, node, context, origin, directive.inputs);
                         } else {
                             this.errors.push(`Could not fetch project file ${directive.project}/${file}. Permission denied or file not found. If this is a restricted PEP file, please provide a local copy and enable the 'visualizer.preferLocalIncludes' setting.`);
                         }
@@ -438,7 +492,7 @@ export class PipelineParser {
                 if (content) {
                     const node = { name: targetName, children: [] };
                     parentNode.children.push(node);
-                    await this.parseRecursive(content, targetName, depth, node, context);
+                    await this.parseRecursive(content, targetName, depth, node, context, undefined, directive.inputs);
                 }
             }
         } catch (e) {
@@ -555,7 +609,7 @@ export class PipelineParser {
         return undefined;
     }
 
-    private async resolveLocalInclude(inc: string, currentSource: string, depth: number, parentNode: IncludeNode, context?: ParserContext, componentOrigin?: ComponentOrigin) {
+    private async resolveLocalInclude(inc: string, currentSource: string, depth: number, parentNode: IncludeNode, context?: ParserContext, componentOrigin?: ComponentOrigin, providedInputs?: Record<string, any>) {
         try {
             // Try resolving locally first, allowing local overrides and workspace matching
             const resolved = await this.tryResolveLocal(inc, currentSource, context);
@@ -565,7 +619,7 @@ export class PipelineParser {
                 }
                 const node = { name: resolved.path, children: [] };
                 parentNode.children.push(node);
-                await this.parseRecursive(resolved.content, resolved.path, depth, node, context);
+                await this.parseRecursive(resolved.content, resolved.path, depth, node, context, componentOrigin, providedInputs);
                 return;
             }
 
@@ -586,7 +640,7 @@ export class PipelineParser {
                 if (content && typeof content === 'string' && !content.includes('{"message":"404 Project Not Found"}')) {
                     const node = { name: targetName, children: [] };
                     parentNode.children.push(node);
-                    await this.parseRecursive(content, targetName, depth, node, context, componentOrigin);
+                    await this.parseRecursive(content, targetName, depth, node, context, componentOrigin, providedInputs);
                 } else {
                     this.errors.push(`Could not fetch local file ${inc} from ${componentOrigin.projectPath}`);
                 }
