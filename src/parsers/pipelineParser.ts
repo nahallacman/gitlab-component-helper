@@ -1,5 +1,6 @@
 import { parseYaml } from '../utils/yamlParser';
 import { getComponentService } from '../services/component/componentService';
+import { getFallbackGitlabInstance } from '../utils/urlUtils';
 import { getComponentCacheManager } from '../services/cache/componentCacheManager';
 import * as vscode from 'vscode';
 import * as fs from 'fs';
@@ -330,7 +331,7 @@ export class PipelineParser {
 
                 // Expand variables like $CI_SERVER_FQDN
                 componentUrl = expandComponentUrl(componentUrl, {
-                    gitlabInstance: context?.gitlabInstance || 'gitlab.com',
+                    gitlabInstance: context?.gitlabInstance || getFallbackGitlabInstance(),
                     serverUrl: context?.serverUrl,
                     projectPath: context?.projectPath,
                     customVariables: context?.customVariables
@@ -417,18 +418,18 @@ export class PipelineParser {
                 // Project include
                 let projectPath = directive.project;
                 projectPath = expandGitLabVariables(projectPath, {
-                    gitlabInstance: context?.gitlabInstance || 'gitlab.com',
+                    gitlabInstance: context?.gitlabInstance || getFallbackGitlabInstance(),
                     projectPath: context?.projectPath,
                     customVariables: context?.customVariables
                 });
 
                 const files = Array.isArray(directive.file) ? directive.file : [directive.file];
-                const gitlabInstance = context?.gitlabInstance || 'gitlab.com';
+                const gitlabInstance = context?.gitlabInstance || getFallbackGitlabInstance();
                 const componentService = getComponentService();
 
                 for (const file of files) {
                     let expandedFile = expandGitLabVariables(typeof file === 'string' ? file : String(file), {
-                        gitlabInstance: context?.gitlabInstance || 'gitlab.com',
+                        gitlabInstance: context?.gitlabInstance || getFallbackGitlabInstance(),
                         projectPath: context?.projectPath,
                         customVariables: context?.customVariables
                     });
@@ -479,7 +480,7 @@ export class PipelineParser {
                 // Remote include
                 let remoteUrl = directive.remote;
                 remoteUrl = expandGitLabVariables(remoteUrl, {
-                    gitlabInstance: context?.gitlabInstance || 'gitlab.com',
+                    gitlabInstance: context?.gitlabInstance || getFallbackGitlabInstance(),
                     serverUrl: context?.serverUrl,
                     projectPath: context?.projectPath,
                     customVariables: context?.customVariables

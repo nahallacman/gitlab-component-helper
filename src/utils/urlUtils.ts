@@ -17,3 +17,23 @@ export function safeUrlParse(url: string): URL {
   }
   return new URL(parseableUrl);
 }
+
+/**
+ * Gets the default GitLab instance to use for component fetching/parsing
+ * when an instance is not explicitly provided.
+ * It first checks if the user has defined CI_SERVER_FQDN in customVariables.
+ * 
+ * @returns The fallback GitLab instance FQDN
+ */
+export function getFallbackGitlabInstance(): string {
+  try {
+    const vscode = require('vscode');
+    const config = vscode.workspace.getConfiguration('gitlabComponentHelper');
+    const customVars = config.get<Record<string, string>>('customVariables', {});
+    return customVars['CI_SERVER_FQDN'] || 'gitlab.com';
+  } catch (error) {
+    // If not running in VS Code environment (e.g. tests), default to gitlab.com
+    return 'gitlab.com';
+  }
+}
+

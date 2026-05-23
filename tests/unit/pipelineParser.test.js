@@ -414,10 +414,6 @@ $[[ inputs.job_prefix ]]job:
             // Let's mock the fetch for a component
             mockComponentService.httpClient.fetchText = async (url) => ''; // Not used for component
             
-            // Override cache manager for this test
-            const originalGetCache = originalRequire('.../componentCacheManager'); // just mocking
-            const fakeGraph = await parser.parse('include:\n  - component: test-comp@1.0\n    inputs:\n      stage_name: build\n      job_prefix: custom_', 'main.yml');
-            
             // Since we didn't mock the cache manager perfectly here, let's just use the parser's internal parseRecursive via reflection/any cast or 
             // wait, we can just mock the component service correctly.
             // Instead, I'll test it via parseRecursive directly since we are in JS

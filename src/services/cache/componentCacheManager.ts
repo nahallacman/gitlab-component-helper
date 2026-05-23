@@ -251,7 +251,12 @@ export class ComponentCacheManager {
         const fetchPromises = sources.map(async source => {
           try {
             // Handle both hostname and full URL formats
-            let gitlabInstance = source.gitlabInstance || 'gitlab.com';
+            let gitlabInstance = source.gitlabInstance;
+            
+            if (!gitlabInstance) {
+              const customVars = config.get<Record<string, string>>('customVariables', {});
+              gitlabInstance = customVars['CI_SERVER_FQDN'] || 'gitlab.com';
+            }
             if (gitlabInstance.startsWith('https://')) {
               gitlabInstance = gitlabInstance.replace('https://', '');
             }
