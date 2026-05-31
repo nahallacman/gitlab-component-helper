@@ -3,10 +3,9 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 /**
- * Attempts to extract the GitLab project path (e.g. group/subgroup/project)
- * by finding the nearest .git/config file and parsing the origin remote URL.
+ * Reads the nearest .git/config file and extracts the origin remote URL.
  */
-export async function getProjectPathFromLocalFile(filePath: string): Promise<string | undefined> {
+async function getOriginUrl(filePath: string): Promise<string | undefined> {
     try {
         const workspaceFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath));
         if (!workspaceFolder) {
@@ -26,7 +25,20 @@ export async function getProjectPathFromLocalFile(filePath: string): Promise<str
             return undefined;
         }
 
-        const remoteUrl = originMatch[1].trim();
+        return originMatch[1].trim();
+    } catch {
+        return undefined;
+    }
+}
+
+/**
+ * Attempts to extract the GitLab project path (e.g. group/subgroup/project)
+ * by finding the nearest .git/config file and parsing the origin remote URL.
+ */
+export async function getProjectPathFromLocalFile(filePath: string): Promise<string | undefined> {
+    try {
+        const remoteUrl = await getOriginUrl(filePath);
+        if (!remoteUrl) return undefined;
 
         // Extract path from various git URL formats
         // SSH: git@gitlab.com:group/project.git
@@ -65,6 +77,41 @@ export async function getProjectPathFromLocalFile(filePath: string): Promise<str
         return projectPath;
     } catch (e) {
         // Silently fail if we can't read the file or parse it
+        return undefined;
+    }
+}
+
+/**
+ * Attempts to extract the GitLab instance hostname (e.g. gitlab.mycorp.com)
+ * by finding the nearest .git/config file and parsing the origin remote URL.
+ */
+export async function getGitLabInstanceFromLocalFile(filePath: string): Promise<string | undefined> {
+    try {
+        const remoteUrl = await getOriginUrl(filePath);
+        if (!remoteUrl) return undefined;
+
+        if (remoteUrl.startsWith('http://') || remoteUrl.startsWith('https://')) {
+            try {
+                const urlObj = new URL(remoteUrl);
+                return urlObj.hostname;
+            } catch {
+                return undefined;
+            }
+        } else if (remoteUrl.startsWith('ssh://')) {
+            try {
+                const urlObj = new URL(remoteUrl);
+                return urlObj.hostname;
+            } catch {
+                return undefined;
+            }
+        } else if (remoteUrl.includes('@') && remoteUrl.includes(':')) {
+            // git@gitlab.com:group/project.git
+            const hostPart = remoteUrl.split(':')[0];
+            const domain = hostPart.split('@')[1];
+            return domain;
+        }
+        return undefined;
+    } catch {
         return undefined;
     }
 }

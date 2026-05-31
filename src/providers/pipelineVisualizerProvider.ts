@@ -30,6 +30,10 @@ export class PipelineVisualizerProvider {
     private graph: PipelineGraph | undefined;
     private hiddenSources = new Set<string>();
     private sourceColors = new Map<string, string>();
+    private interpolateInputs: boolean = true;
+    private showRawCode: boolean = false;
+    private lastDocument?: vscode.TextDocument;
+    private lastComponentContext?: any;
 
     constructor(context: vscode.ExtensionContext) {
         this.context = context;
@@ -63,9 +67,20 @@ export class PipelineVisualizerProvider {
                         const newMermaidCode = this.generateMermaidCode(this.graph, this.hiddenSources, this.sourceColors);
                         this.panel?.webview.postMessage({ type: 'rerender', mermaidCode: newMermaidCode });
                     }
+                } else if (message.type === 'toggleInterpolation') {
+                    this.interpolateInputs = message.interpolateInputs;
+                    // Trigger a re-parse by calling show again with saved context
+                    this.show(this.lastComponentContext, this.lastDocument);
+                } else if (message.type === 'toggleRawCode') {
+                    this.showRawCode = message.showRawCode;
+                    // Trigger a re-render by calling show again
+                    this.show(this.lastComponentContext, this.lastDocument);
                 }
             });
         }
+
+        this.lastDocument = document;
+        this.lastComponentContext = componentContext;
 
         this.panel.webview.html = this.getLoadingHtml();
 
@@ -142,8 +157,8 @@ export class PipelineVisualizerProvider {
             }
 
             const parserContext = componentContext
-                ? { ...componentContext, customVariables, activePolicyOverride }
-                : { gitlabInstance, projectPath, customVariables, activePolicyOverride };
+                ? { ...componentContext, customVariables, activePolicyOverride, interpolateInputs: this.interpolateInputs }
+                : { gitlabInstance, projectPath, customVariables, activePolicyOverride, interpolateInputs: this.interpolateInputs };
 
             let includesToProcess = [...alwaysInclude];
             let pepWarning: string | undefined;
@@ -289,6 +304,8 @@ export class PipelineVisualizerProvider {
         let mermaidCode = 'flowchart LR\n';
 
         const stageIds: string[] = [];
+        const jobNameToId = new Map<string, string>();
+        let linkCounter = 0;
 
         // Filter stages: we only show explicit stages or implicit stages that have jobs
         const visibleStages = graph.stages.filter(s => !s.isImplicit || s.jobs.length > 0);
@@ -322,7 +339,42 @@ export class PipelineVisualizerProvider {
                     }
                     usedJobIds.add(jobId);
                     jobIds.push(jobId);
-                    mermaidCode += `    ${jobId}["${escapeMermaid(job.name)}<br/><small><i>${escapeMermaid(job.source)}</i></small>"]\n`;
+                    jobNameToId.set(job.name, jobId);
+
+                    let extraInfo = '';
+                    if (this.showRawCode) {
+                        if (job.rules && job.rules.length > 0) {
+                            const rawRules = escapeMermaid(JSON.stringify(job.rules, null, 2).replace(/"/g, "'")).replace(/\n/g, '<br/>').replace(/ /g, '&#160;');
+                            extraInfo += `<br/><br/><b>rules:</b><br/><small>${rawRules}</small>`;
+                        }
+                        if (job.variables && Object.keys(job.variables).length > 0) {
+                            const rawVars = escapeMermaid(JSON.stringify(job.variables, null, 2).replace(/"/g, "'")).replace(/\n/g, '<br/>').replace(/ /g, '&#160;');
+                            extraInfo += `<br/><br/><b>variables:</b><br/><small>${rawVars}</small>`;
+                        }
+                        if (job.beforeScript) {
+                            const rawBefore = escapeMermaid(JSON.stringify(job.beforeScript, null, 2).replace(/"/g, "'")).replace(/\n/g, '<br/>').replace(/ /g, '&#160;');
+                            extraInfo += `<br/><br/><b>before_script:</b><br/><small>${rawBefore}</small>`;
+                        }
+                        if (job.afterScript) {
+                            const rawAfter = escapeMermaid(JSON.stringify(job.afterScript, null, 2).replace(/"/g, "'")).replace(/\n/g, '<br/>').replace(/ /g, '&#160;');
+                            extraInfo += `<br/><br/><b>after_script:</b><br/><small>${rawAfter}</small>`;
+                        }
+                    } else {
+                        if (job.rules && job.rules.length > 0) {
+                            extraInfo += `<br/><small>📝 ${job.rules.length} rule(s)</small>`;
+                        }
+                        if (job.variables && Object.keys(job.variables).length > 0) {
+                            extraInfo += `<br/><small>🔧 ${Object.keys(job.variables).length} var(s)</small>`;
+                        }
+                        if (job.hasBeforeScript) {
+                            extraInfo += `<br/><small>⚙️ before_script</small>`;
+                        }
+                        if (job.hasAfterScript) {
+                            extraInfo += `<br/><small>⚙️ after_script</small>`;
+                        }
+                    }
+
+                    mermaidCode += `    ${jobId}["${escapeMermaid(job.name)}<br/><small><i>${escapeMermaid(job.source)}</i></small>${extraInfo}"]\n`;
 
                     // Apply color if configured
                     const color = effectiveColors.get(job.source);
@@ -336,6 +388,7 @@ export class PipelineVisualizerProvider {
                 // ~~~ links guarantee the layout engine stacks them top-to-bottom.
                 if (jobIds.length > 1) {
                     mermaidCode += `    ${jobIds.join(' ~~~ ')}\n`;
+                    linkCounter += jobIds.length - 1;
                 }
             }
             mermaidCode += `  end\n`;
@@ -351,7 +404,28 @@ export class PipelineVisualizerProvider {
         // Link stages to enforce ordering
         for (let i = 0; i < stageIds.length - 1; i++) {
             mermaidCode += `  ${stageIds[i]} --> ${stageIds[i + 1]}\n`;
+            linkCounter++;
         }
+
+        // Draw DAG (needs) links
+        visibleStages.forEach(stage => {
+            const visibleJobs = stage.jobs.filter(job => !effectiveHidden.has(job.source));
+            visibleJobs.forEach(job => {
+                if (job.needs && job.needs.length > 0) {
+                    const thisJobId = jobNameToId.get(job.name);
+                    if (thisJobId) {
+                        job.needs.forEach(need => {
+                            const neededJobId = jobNameToId.get(need);
+                            if (neededJobId) {
+                                mermaidCode += `  ${neededJobId} -.->|needs| ${thisJobId}\n`;
+                                mermaidCode += `  linkStyle ${linkCounter} stroke:#ff5722,stroke-width:2px,color:#ff5722\n`;
+                                linkCounter++;
+                            }
+                        });
+                    }
+                }
+            });
+        });
 
         return mermaidCode;
     }
@@ -549,6 +623,16 @@ export class PipelineVisualizerProvider {
         <body>
             <div class="container">
                 <h2>Pipeline: ${escapeHtml(sourceName)}</h2>
+                <div style="margin-bottom: 10px; display: flex; gap: 20px;">
+                    <label style="display: flex; align-items: center; gap: 5px; cursor: pointer; user-select: none;">
+                        <input type="checkbox" id="toggleInterpolation" ${this.interpolateInputs ? 'checked' : ''}>
+                        Interpolate Component Inputs
+                    </label>
+                    <label style="display: flex; align-items: center; gap: 5px; cursor: pointer; user-select: none;">
+                        <input type="checkbox" id="toggleRawCode" ${this.showRawCode ? 'checked' : ''}>
+                        Show Raw CI Element Code
+                    </label>
+                </div>
                 ${pepPanelHtml}
                 ${activePolicyOverride ? `<div class="info-banner"><strong>🛡️ Active Policy Override:</strong> ${escapeHtml(activePolicyOverride)} <small>(Other policies are being ignored)</small></div>` : ''}
                 <div class="graph-container">
@@ -644,6 +728,20 @@ export class PipelineVisualizerProvider {
                 
                 // Initial sync so the extension knows the current UI state on load
                 sendUpdate();
+
+                document.getElementById('toggleInterpolation').addEventListener('change', (e) => {
+                    vscode.postMessage({
+                        type: 'toggleInterpolation',
+                        interpolateInputs: e.target.checked
+                    });
+                });
+
+                document.getElementById('toggleRawCode').addEventListener('change', (e) => {
+                    vscode.postMessage({
+                        type: 'toggleRawCode',
+                        showRawCode: e.target.checked
+                    });
+                });
 
                 // Cascade toggle: when a parent is (un)checked, apply same state to all descendants
                 function cascadeToggle(source, checked) {

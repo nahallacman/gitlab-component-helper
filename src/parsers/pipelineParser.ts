@@ -1,5 +1,6 @@
 import { parseYaml } from '../utils/yamlParser';
 import { getComponentService } from '../services/component/componentService';
+import { getFallbackGitlabInstance } from '../utils/urlUtils';
 import { getComponentCacheManager } from '../services/cache/componentCacheManager';
 import * as vscode from 'vscode';
 import * as fs from 'fs';
@@ -10,6 +11,13 @@ export interface PipelineJob {
     name: string;
     stage: string;
     source: string;
+    needs?: string[];
+    rules?: any[];
+    variables?: Record<string, string>;
+    hasBeforeScript?: boolean;
+    hasAfterScript?: boolean;
+    beforeScript?: any;
+    afterScript?: any;
 }
 
 export interface PipelineStage {
@@ -42,6 +50,7 @@ export interface ParserContext {
     customVariables?: Record<string, string>;
     activePolicyOverride?: string;
     serverUrl?: string;
+    interpolateInputs?: boolean;
     [key: string]: any;
 }
 
@@ -53,6 +62,7 @@ export interface IncludeDirective {
     remote?: string;
     component?: string;
     template?: string;
+    inputs?: Record<string, any>;
 }
 
 const DEFAULT_STAGES = ['.pre', 'build', 'test', 'deploy', '.post'];
@@ -73,6 +83,7 @@ export class PipelineParser {
     private allowedRoots: string[] | null = null;
     private extraAllowedRoots: string[] = [];
     private entryDirectory: string | null = null;
+    private stagesDefinedAtDepth: number = Infinity;
 
     constructor(maxDepth: number = 10) {
         this.maxDepth = maxDepth;
@@ -87,6 +98,7 @@ export class PipelineParser {
         this.errors = [];
         this.allowedRoots = null; // Clear cached allowed roots for the new parsing run
         this.extraAllowedRoots = [];
+        this.stagesDefinedAtDepth = Infinity;
 
         if (path.isAbsolute(sourceName)) {
             this.entryDirectory = path.dirname(sourceName);
@@ -111,7 +123,7 @@ export class PipelineParser {
         return this.buildGraph();
     }
 
-    private async parseRecursive(content: string, sourceName: string, depth: number, parentNode: IncludeNode, context?: ParserContext, componentOrigin?: ComponentOrigin) {
+    private async parseRecursive(content: string, sourceName: string, depth: number, parentNode: IncludeNode, context?: ParserContext, componentOrigin?: ComponentOrigin, providedInputs?: Record<string, any>) {
         if (depth >= this.maxDepth) {
             this.errors.push(`Max recursion depth (${this.maxDepth}) reached at ${sourceName}`);
             return;
@@ -126,9 +138,36 @@ export class PipelineParser {
         // Strip out the `spec:` block and split by --- to handle components
         const parts = content.split(/^---\s*$/m);
         let ciContent = content;
+        let specInputs: Record<string, any> = {};
+
         if (parts.length > 1) {
             // Usually spec is before ---, and jobs are after.
+            if (context?.interpolateInputs !== false) {
+                try {
+                    const specDoc = parseYaml(parts[0]);
+                    if (specDoc && specDoc.spec && specDoc.spec.inputs) {
+                        for (const key of Object.keys(specDoc.spec.inputs)) {
+                            const val = specDoc.spec.inputs[key];
+                            if (val && typeof val === 'object' && 'default' in val) {
+                                specInputs[key] = val.default;
+                            }
+                        }
+                    }
+                } catch (e) {
+                    // Ignore parse errors in spec block, proceed with empty defaults
+                }
+            }
             ciContent = parts.slice(1).join('\n');
+        }
+
+        if (context?.interpolateInputs !== false) {
+            const finalInputs = { ...specInputs, ...(providedInputs || {}) };
+            ciContent = ciContent.replace(/\$\[\[\s*inputs\.([a-zA-Z0-9_]+)\s*\]\]/g, (match, key) => {
+                if (finalInputs[key] !== undefined) {
+                    return String(finalInputs[key]);
+                }
+                return match;
+            });
         }
 
         const parsed = parseYaml(ciContent);
@@ -139,10 +178,11 @@ export class PipelineParser {
 
         // 1. Extract stages
         if (parsed.stages && Array.isArray(parsed.stages)) {
-            for (const stage of parsed.stages) {
-                if (!this.customStages.includes(stage)) {
-                    this.customStages.push(stage);
-                }
+            // Files closer to root (lower depth) override included files.
+            // For files at the same depth, the last one parsed overrides the earlier ones.
+            if (depth <= this.stagesDefinedAtDepth) {
+                this.customStages = [...parsed.stages];
+                this.stagesDefinedAtDepth = depth;
             }
         }
 
@@ -156,10 +196,35 @@ export class PipelineParser {
             const jobObj = parsed[key];
             if (jobObj && typeof jobObj === 'object') {
                 const stage = jobObj.stage || 'test'; // default stage is test in GitLab CI
+
+                let needs: string[] = [];
+                if (jobObj.needs && Array.isArray(jobObj.needs)) {
+                    needs = jobObj.needs.map((n: any) => typeof n === 'string' ? n : (n.job || ''));
+                }
+
+                let rules: any[] = [];
+                if (jobObj.rules && Array.isArray(jobObj.rules)) {
+                    rules = jobObj.rules;
+                }
+
+                let variables = typeof jobObj.variables === 'object' ? jobObj.variables : undefined;
+                let hasBeforeScript = !!jobObj.before_script;
+                let hasAfterScript = !!jobObj.after_script;
+
+                let beforeScript = jobObj.before_script;
+                let afterScript = jobObj.after_script;
+
                 this.allJobs.push({
                     name: key,
                     stage: stage,
-                    source: sourceName
+                    source: sourceName,
+                    needs: needs.filter(n => n),
+                    rules: rules,
+                    variables: variables,
+                    hasBeforeScript: hasBeforeScript,
+                    hasAfterScript: hasAfterScript,
+                    beforeScript: beforeScript,
+                    afterScript: afterScript
                 });
             }
         }
@@ -202,10 +267,10 @@ export class PipelineParser {
 
                 // Extract stages declared inside the policy pipeline
                 if (pipelineDoc.stages && Array.isArray(pipelineDoc.stages)) {
-                    for (const stage of pipelineDoc.stages) {
-                        if (!this.customStages.includes(stage)) {
-                            this.customStages.push(stage);
-                        }
+                    // Policies are evaluated at the depth they are included.
+                    if (depth <= this.stagesDefinedAtDepth) {
+                        this.customStages = [...pipelineDoc.stages];
+                        this.stagesDefinedAtDepth = depth;
                     }
                 }
 
@@ -260,7 +325,7 @@ export class PipelineParser {
 
             if (directive.local) {
                 // Local include
-                await this.resolveLocalInclude(directive.local, currentSource, depth, parentNode, context, componentOrigin);
+                await this.resolveLocalInclude(directive.local, currentSource, depth, parentNode, context, componentOrigin, directive.inputs);
                 return;
             } else if (directive.component) {
                 // Component include
@@ -269,7 +334,7 @@ export class PipelineParser {
 
                 // Expand variables like $CI_SERVER_FQDN
                 componentUrl = expandComponentUrl(componentUrl, {
-                    gitlabInstance: context?.gitlabInstance || 'gitlab.com',
+                    gitlabInstance: context?.gitlabInstance || await getFallbackGitlabInstance(vscode.Uri.file(currentSource)),
                     serverUrl: context?.serverUrl,
                     projectPath: context?.projectPath,
                     customVariables: context?.customVariables
@@ -314,7 +379,7 @@ export class PipelineParser {
                             }
                             const node = { name: nodeName, children: [] };
                             parentNode.children.push(node);
-                            await this.parseRecursive(resolved.content, resolved.path, depth, node, context);
+                            await this.parseRecursive(resolved.content, resolved.path, depth, node, context, undefined, directive.inputs);
                             resolvedLocally = true;
                             break;
                         }
@@ -339,7 +404,7 @@ export class PipelineParser {
                             };
                             const node = { name: targetName, children: [] };
                             parentNode.children.push(node);
-                            await this.parseRecursive(content, targetName, depth, node, context, origin);
+                            await this.parseRecursive(content, targetName, depth, node, context, origin, directive.inputs);
                             fetched = true;
                             break;
                         }
@@ -356,18 +421,18 @@ export class PipelineParser {
                 // Project include
                 let projectPath = directive.project;
                 projectPath = expandGitLabVariables(projectPath, {
-                    gitlabInstance: context?.gitlabInstance || 'gitlab.com',
+                    gitlabInstance: context?.gitlabInstance || await getFallbackGitlabInstance(vscode.Uri.file(currentSource)),
                     projectPath: context?.projectPath,
                     customVariables: context?.customVariables
                 });
 
                 const files = Array.isArray(directive.file) ? directive.file : [directive.file];
-                const gitlabInstance = context?.gitlabInstance || 'gitlab.com';
+                const gitlabInstance = context?.gitlabInstance || await getFallbackGitlabInstance(vscode.Uri.file(currentSource));
                 const componentService = getComponentService();
 
                 for (const file of files) {
                     let expandedFile = expandGitLabVariables(typeof file === 'string' ? file : String(file), {
-                        gitlabInstance: context?.gitlabInstance || 'gitlab.com',
+                        gitlabInstance: context?.gitlabInstance || await getFallbackGitlabInstance(vscode.Uri.file(currentSource)),
                         projectPath: context?.projectPath,
                         customVariables: context?.customVariables
                     });
@@ -389,7 +454,7 @@ export class PipelineParser {
                             }
                             const node = { name: nodeName, children: [] };
                             parentNode.children.push(node);
-                            await this.parseRecursive(resolved.content, resolved.path, depth, node, context);
+                            await this.parseRecursive(resolved.content, resolved.path, depth, node, context, undefined, directive.inputs);
                             continue; // Move to next file in directive.file array
                         }
                     }
@@ -405,7 +470,7 @@ export class PipelineParser {
                             const origin: ComponentOrigin = { gitlabInstance, projectPath, ref };
                             const node = { name: targetName, children: [] };
                             parentNode.children.push(node);
-                            await this.parseRecursive(content, targetName, depth, node, context, origin);
+                            await this.parseRecursive(content, targetName, depth, node, context, origin, directive.inputs);
                         } else {
                             this.errors.push(`Could not fetch project file ${directive.project}/${file}. Permission denied or file not found. If this is a restricted PEP file, please provide a local copy and enable the 'visualizer.preferLocalIncludes' setting.`);
                         }
@@ -418,7 +483,7 @@ export class PipelineParser {
                 // Remote include
                 let remoteUrl = directive.remote;
                 remoteUrl = expandGitLabVariables(remoteUrl, {
-                    gitlabInstance: context?.gitlabInstance || 'gitlab.com',
+                    gitlabInstance: context?.gitlabInstance || await getFallbackGitlabInstance(vscode.Uri.file(currentSource)),
                     serverUrl: context?.serverUrl,
                     projectPath: context?.projectPath,
                     customVariables: context?.customVariables
@@ -438,7 +503,7 @@ export class PipelineParser {
                 if (content) {
                     const node = { name: targetName, children: [] };
                     parentNode.children.push(node);
-                    await this.parseRecursive(content, targetName, depth, node, context);
+                    await this.parseRecursive(content, targetName, depth, node, context, undefined, directive.inputs);
                 }
             }
         } catch (e) {
@@ -555,7 +620,7 @@ export class PipelineParser {
         return undefined;
     }
 
-    private async resolveLocalInclude(inc: string, currentSource: string, depth: number, parentNode: IncludeNode, context?: ParserContext, componentOrigin?: ComponentOrigin) {
+    private async resolveLocalInclude(inc: string, currentSource: string, depth: number, parentNode: IncludeNode, context?: ParserContext, componentOrigin?: ComponentOrigin, providedInputs?: Record<string, any>) {
         try {
             // Try resolving locally first, allowing local overrides and workspace matching
             const resolved = await this.tryResolveLocal(inc, currentSource, context);
@@ -565,7 +630,7 @@ export class PipelineParser {
                 }
                 const node = { name: resolved.path, children: [] };
                 parentNode.children.push(node);
-                await this.parseRecursive(resolved.content, resolved.path, depth, node, context);
+                await this.parseRecursive(resolved.content, resolved.path, depth, node, context, componentOrigin, providedInputs);
                 return;
             }
 
@@ -586,7 +651,7 @@ export class PipelineParser {
                 if (content && typeof content === 'string' && !content.includes('{"message":"404 Project Not Found"}')) {
                     const node = { name: targetName, children: [] };
                     parentNode.children.push(node);
-                    await this.parseRecursive(content, targetName, depth, node, context, componentOrigin);
+                    await this.parseRecursive(content, targetName, depth, node, context, componentOrigin, providedInputs);
                 } else {
                     this.errors.push(`Could not fetch local file ${inc} from ${componentOrigin.projectPath}`);
                 }
@@ -612,18 +677,29 @@ export class PipelineParser {
             if (!orderedStages.includes('.post')) orderedStages.push('.post');
         }
 
+        // Clean up any PEP stages from the middle (they might be in customStages)
+        orderedStages = orderedStages.filter(s => s !== '.pipeline-policy-pre' && s !== '.pipeline-policy-post');
+
         // Ensure all jobs have their stages created, even if they defined a stage that isn't in `stages`.
         // Insert before .post so .post always remains last, matching GitLab CI behaviour.
         const jobStages = new Set(this.allJobs.map(j => j.stage));
-        const postIdx = orderedStages.indexOf('.post');
         for (const s of jobStages) {
-            if (!orderedStages.includes(s)) {
-                if (postIdx >= 0) {
-                    orderedStages.splice(postIdx, 0, s);
+            if (!orderedStages.includes(s) && s !== '.pipeline-policy-pre' && s !== '.pipeline-policy-post') {
+                const currentPostIdx = orderedStages.indexOf('.post');
+                if (currentPostIdx >= 0) {
+                    orderedStages.splice(currentPostIdx, 0, s);
                 } else {
                     orderedStages.push(s);
                 }
             }
+        }
+
+        // Finally, add PEP stages at the absolute extremes
+        if (jobStages.has('.pipeline-policy-pre') || this.customStages.includes('.pipeline-policy-pre')) {
+            orderedStages.unshift('.pipeline-policy-pre');
+        }
+        if (jobStages.has('.pipeline-policy-post') || this.customStages.includes('.pipeline-policy-post')) {
+            orderedStages.push('.pipeline-policy-post');
         }
 
         for (const stageName of orderedStages) {
@@ -631,7 +707,7 @@ export class PipelineParser {
             finalStages.push({
                 name: stageName,
                 jobs: jobsInStage,
-                isImplicit: DEFAULT_STAGES.includes(stageName) && !this.customStages.includes(stageName)
+                isImplicit: (DEFAULT_STAGES.includes(stageName) || stageName.startsWith('.pipeline-policy-')) && !this.customStages.includes(stageName)
             });
         }
 

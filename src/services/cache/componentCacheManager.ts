@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { getComponentService } from '../component';
+import { getFallbackGitlabInstance } from '../../utils/urlUtils';
 import { Logger } from '../../utils/logger';
 import { getPerformanceMonitor } from '../../utils/performanceMonitor';
 import { CachedComponent, PersistentCacheData } from '../../types/cache';
@@ -251,7 +252,20 @@ export class ComponentCacheManager {
         const fetchPromises = sources.map(async source => {
           try {
             // Handle both hostname and full URL formats
-            let gitlabInstance = source.gitlabInstance || 'gitlab.com';
+            let gitlabInstance = source.gitlabInstance;
+            
+            if (!gitlabInstance) {
+              // Try to find a document URI to extract git context from if available.
+              let documentUri: vscode.Uri | undefined;
+              if (vscode.window.activeTextEditor) {
+                documentUri = vscode.window.activeTextEditor.document.uri;
+              } else if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
+                // If no active editor but there's a workspace, we use the root to potentially find a .git folder
+                documentUri = vscode.workspace.workspaceFolders[0].uri;
+              }
+              
+              gitlabInstance = await getFallbackGitlabInstance(documentUri);
+            }
             if (gitlabInstance.startsWith('https://')) {
               gitlabInstance = gitlabInstance.replace('https://', '');
             }
