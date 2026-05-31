@@ -83,6 +83,7 @@ export class PipelineParser {
     private allowedRoots: string[] | null = null;
     private extraAllowedRoots: string[] = [];
     private entryDirectory: string | null = null;
+    private stagesDefinedAtDepth: number = Infinity;
 
     constructor(maxDepth: number = 10) {
         this.maxDepth = maxDepth;
@@ -97,6 +98,7 @@ export class PipelineParser {
         this.errors = [];
         this.allowedRoots = null; // Clear cached allowed roots for the new parsing run
         this.extraAllowedRoots = [];
+        this.stagesDefinedAtDepth = Infinity;
 
         if (path.isAbsolute(sourceName)) {
             this.entryDirectory = path.dirname(sourceName);
@@ -176,10 +178,11 @@ export class PipelineParser {
 
         // 1. Extract stages
         if (parsed.stages && Array.isArray(parsed.stages)) {
-            for (const stage of parsed.stages) {
-                if (!this.customStages.includes(stage)) {
-                    this.customStages.push(stage);
-                }
+            // Files closer to root (lower depth) override included files.
+            // For files at the same depth, the last one parsed overrides the earlier ones.
+            if (depth <= this.stagesDefinedAtDepth) {
+                this.customStages = [...parsed.stages];
+                this.stagesDefinedAtDepth = depth;
             }
         }
 
@@ -193,12 +196,12 @@ export class PipelineParser {
             const jobObj = parsed[key];
             if (jobObj && typeof jobObj === 'object') {
                 const stage = jobObj.stage || 'test'; // default stage is test in GitLab CI
-                
+
                 let needs: string[] = [];
                 if (jobObj.needs && Array.isArray(jobObj.needs)) {
                     needs = jobObj.needs.map((n: any) => typeof n === 'string' ? n : (n.job || ''));
                 }
-                
+
                 let rules: any[] = [];
                 if (jobObj.rules && Array.isArray(jobObj.rules)) {
                     rules = jobObj.rules;
@@ -207,7 +210,7 @@ export class PipelineParser {
                 let variables = typeof jobObj.variables === 'object' ? jobObj.variables : undefined;
                 let hasBeforeScript = !!jobObj.before_script;
                 let hasAfterScript = !!jobObj.after_script;
-                
+
                 let beforeScript = jobObj.before_script;
                 let afterScript = jobObj.after_script;
 
@@ -264,10 +267,10 @@ export class PipelineParser {
 
                 // Extract stages declared inside the policy pipeline
                 if (pipelineDoc.stages && Array.isArray(pipelineDoc.stages)) {
-                    for (const stage of pipelineDoc.stages) {
-                        if (!this.customStages.includes(stage)) {
-                            this.customStages.push(stage);
-                        }
+                    // Policies are evaluated at the depth they are included.
+                    if (depth <= this.stagesDefinedAtDepth) {
+                        this.customStages = [...pipelineDoc.stages];
+                        this.stagesDefinedAtDepth = depth;
                     }
                 }
 
@@ -674,18 +677,29 @@ export class PipelineParser {
             if (!orderedStages.includes('.post')) orderedStages.push('.post');
         }
 
+        // Clean up any PEP stages from the middle (they might be in customStages)
+        orderedStages = orderedStages.filter(s => s !== '.pipeline-policy-pre' && s !== '.pipeline-policy-post');
+
         // Ensure all jobs have their stages created, even if they defined a stage that isn't in `stages`.
         // Insert before .post so .post always remains last, matching GitLab CI behaviour.
         const jobStages = new Set(this.allJobs.map(j => j.stage));
-        const postIdx = orderedStages.indexOf('.post');
         for (const s of jobStages) {
-            if (!orderedStages.includes(s)) {
-                if (postIdx >= 0) {
-                    orderedStages.splice(postIdx, 0, s);
+            if (!orderedStages.includes(s) && s !== '.pipeline-policy-pre' && s !== '.pipeline-policy-post') {
+                const currentPostIdx = orderedStages.indexOf('.post');
+                if (currentPostIdx >= 0) {
+                    orderedStages.splice(currentPostIdx, 0, s);
                 } else {
                     orderedStages.push(s);
                 }
             }
+        }
+
+        // Finally, add PEP stages at the absolute extremes
+        if (jobStages.has('.pipeline-policy-pre') || this.customStages.includes('.pipeline-policy-pre')) {
+            orderedStages.unshift('.pipeline-policy-pre');
+        }
+        if (jobStages.has('.pipeline-policy-post') || this.customStages.includes('.pipeline-policy-post')) {
+            orderedStages.push('.pipeline-policy-post');
         }
 
         for (const stageName of orderedStages) {
@@ -693,7 +707,7 @@ export class PipelineParser {
             finalStages.push({
                 name: stageName,
                 jobs: jobsInStage,
-                isImplicit: DEFAULT_STAGES.includes(stageName) && !this.customStages.includes(stageName)
+                isImplicit: (DEFAULT_STAGES.includes(stageName) || stageName.startsWith('.pipeline-policy-')) && !this.customStages.includes(stageName)
             });
         }
 
