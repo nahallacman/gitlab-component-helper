@@ -13,6 +13,7 @@ import type { CachedComponent } from './types/cache';
 import type { GitLabYamlFragment } from './types/gitlab-catalog';
 import type { HoverContext } from './providers/hoverContentBuilder';
 import { registerPipelineParserCommands } from './providers/pipelineParserCommandRegistrations';
+import { PipelineParser } from './parsers/pipelineParser';
 
 /** Component payload passed to the `detachHover` command. Adds the hover-builder's location context. */
 type DetachableComponent = Component & { _hoverContext?: HoverContext };
@@ -683,6 +684,11 @@ export function activate(context: vscode.ExtensionContext) {
 
     logger.info('[Extension] All commands registered successfully!', 'Extension');
     logger.info('[Extension] Extension activation completed successfully!', 'Extension');
+
+    // Expose API for external extensions (e.g. standalone visualizers)
+    return {
+      PipelineParser
+    };
 
   } catch (error) {
     const logger = Logger.getInstance();
